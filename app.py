@@ -19,5 +19,10 @@ def hello():
     return jsonify({"message": f"Hello {name}"})
 
 
+@app.route("/api/status")
+def status():
+    return jsonify({"version": "1.0.0", "uptime": "ok"})
+
+
 if __name__ == "__main__":
     app.run(debug=True)
