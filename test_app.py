@@ -67,7 +67,7 @@ def test_status_status_code(client):
 def test_status_json_version(client):
     response = client.get("/api/status")
     data = response.get_json()
-    assert data["version"] == "1.0.0"
+    assert data["version"] == "2.0.0" 
 
 
 def test_status_json_uptime(client):
