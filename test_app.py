@@ -55,3 +55,22 @@ def test_hello_default_name(client):
 def test_hello_content_type(client):
     response = client.get("/api/hello?name=DevOps")
     assert response.content_type == "application/json"
+
+
+# --- GET /api/status ---
+
+def test_status_status_code(client):
+    response = client.get("/api/status")
+    assert response.status_code == 200
+
+
+def test_status_json_version(client):
+    response = client.get("/api/status")
+    data = response.get_json()
+    assert data["version"] == "1.0.0"
+
+
+def test_status_json_uptime(client):
+    response = client.get("/api/status")
+    data = response.get_json()
+    assert data["uptime"] == "ok"
