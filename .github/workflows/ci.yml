@@ -1,0 +1,40 @@
+# Pipeline CI — déclenché à chaque push ou pull request vers main
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    # Machine virtuelle fournie par GitHub (Ubuntu gratuit)
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Récupère le code source du dépôt dans le runner
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # 2. Installe Python 3.12 sur le runner
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 3. Met à jour pip puis installe toutes les dépendances du projet
+      - name: Installation des dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 4. Vérifie la qualité du code : erreurs de style, imports inutilisés, etc.
+      #    Le pipeline échoue si ruff trouve des problèmes
+      - name: Lint avec ruff
+        run: ruff check .
+
+      # 5. Lance les tests et affiche le rapport de couverture ligne par ligne
+      #    Le pipeline échoue si un test ne passe pas
+      - name: Tests avec pytest + coverage
+        run: pytest --cov=app --cov-report=term-missing
