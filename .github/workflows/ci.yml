@@ -23,18 +23,34 @@ jobs:
         with:
           python-version: "3.12"
 
-      # 3. Met à jour pip puis installe toutes les dépendances du projet
+      # 3. Restaure le cache pip si la clé correspond (hash de requirements.txt).
+      #    Si le fichier n'a pas changé depuis le dernier run, pip ne re-télécharge rien :
+      #    les packages sont rechargés depuis le cache GitHub (~30s économisés par run).
+      #    Si requirements.txt change, la clé change → cache miss → pip réinstalle tout
+      #    et GitHub sauvegarde un nouveau cache pour les runs suivants.
+      - name: Cache des dépendances pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # 4. Met à jour pip puis installe toutes les dépendances du projet.
+      #    Si le cache du step précédent est valide, cette étape est quasi-instantanée.
       - name: Installation des dépendances
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4. Vérifie la qualité du code : erreurs de style, imports inutilisés, etc.
-      #    Le pipeline échoue si ruff trouve des problèmes
-      - name: Lint avec ruff
+      # 5. Lint : vérifie la qualité du code (style, imports inutilisés, bugs courants).
+      #    Séparé volontairement des tests pour identifier précisément la source d'un échec :
+      #    si ce step est rouge, c'est un problème de style — pas un bug logique.
+      - name: Lint — ruff check
         run: ruff check .
 
-      # 5. Lance les tests et affiche le rapport de couverture ligne par ligne
-      #    Le pipeline échoue si un test ne passe pas
-      - name: Tests avec pytest + coverage
+      # 6. Tests : exécute pytest et affiche le rapport de couverture ligne par ligne.
+      #    Séparé du lint pour la même raison : si ce step est rouge, c'est un test
+      #    qui échoue, pas un problème de formatage.
+      - name: Tests — pytest + coverage
         run: pytest --cov=app --cov-report=term-missing

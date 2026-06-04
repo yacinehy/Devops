@@ -1,0 +1,15 @@
+# Configuration ruff — linter Python rapide (remplace flake8, isort, pyupgrade)
+
+# Longueur max d'une ligne (même valeur que black pour cohérence)
+line-length = 88
+
+# Version Python cible : ruff adapte ses règles (ex : pas de warnings sur
+# syntaxe valide uniquement en 3.12+)
+target-version = "py312"
+
+[lint]
+# Règles activées :
+#   E / W  → style PEP8 (ex: espaces, indentation)
+#   F      → erreurs logiques (variables inutilisées, imports manquants)
+#   I      → tri des imports (équivalent isort)
+select = ["E", "W", "F", "I"]
