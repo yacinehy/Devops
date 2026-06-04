@@ -12,29 +12,34 @@ jobs:
     # Machine virtuelle fournie par GitHub (Ubuntu gratuit)
     runs-on: ubuntu-latest
 
+    # Strategy matrix : GitHub crée un job distinct par valeur de python-version.
+    # Les deux jobs tournent en parallèle sur des VMs séparées — le push déclenche
+    # donc 2 runs simultanés : un avec Python 3.11, un avec Python 3.12.
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
     steps:
       # 1. Récupère le code source du dépôt dans le runner
       - name: Checkout du code
         uses: actions/checkout@v4
 
-      # 2. Installe Python 3.12 sur le runner
-      - name: Setup Python 3.12
+      # 2. Installe la version Python définie par la matrice (${{ matrix.python-version }}).
+      #    Ce placeholder est remplacé automatiquement : "3.11" dans un job, "3.12" dans l'autre.
+      - name: Setup Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
-      # 3. Restaure le cache pip si la clé correspond (hash de requirements.txt).
-      #    Si le fichier n'a pas changé depuis le dernier run, pip ne re-télécharge rien :
-      #    les packages sont rechargés depuis le cache GitHub (~30s économisés par run).
-      #    Si requirements.txt change, la clé change → cache miss → pip réinstalle tout
-      #    et GitHub sauvegarde un nouveau cache pour les runs suivants.
+      # 3. Restaure le cache pip — la clé inclut la version Python pour éviter
+      #    tout mélange de packages entre les deux jobs de la matrice.
       - name: Cache des dépendances pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
           restore-keys: |
-            ${{ runner.os }}-pip-
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
 
       # 4. Met à jour pip puis installe toutes les dépendances du projet.
       #    Si le cache du step précédent est valide, cette étape est quasi-instantanée.
