@@ -1,0 +1,36 @@
+# Contrôle de version — jamais dans l'image
+.git/
+.gitignore
+
+# Dépendances et environnements locaux — recréés dans le builder stage
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Tests — inutiles en production, réduisent la surface d'attaque
+test_app.py
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Config de dev et CI — non nécessaires au runtime
+.github/
+ruff.toml
+ruff_cache/
+
+# Variables d'environnement — ne JAMAIS embarquer dans une image
+.env
+.env.*
+*.env
+
+# Documentation — inutile dans le conteneur
+README.md
+CONTRIBUTING.md
+
+# Artefacts Docker — évite les boucles récursives
+Dockerfile
+.dockerignore
