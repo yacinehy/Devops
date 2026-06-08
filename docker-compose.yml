@@ -1,0 +1,94 @@
+services:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Service app — Flask via Gunicorn
+  # ─────────────────────────────────────────────────────────────────────────────
+  app:
+    # Build depuis le Dockerfile local (multi-stage → image slim)
+    build: .
+
+    container_name: flask-app
+
+    ports:
+      - "5001:5000"     # 5001 sur l'hôte → 5000 dans le conteneur
+                        # (5000 est occupé par AirPlay sur macOS)
+
+    # Charge toutes les variables du fichier .env dans l'environnement du conteneur.
+    # Flask peut les lire avec os.environ.get("DB_HOST") etc.
+    env_file:
+      - .env
+
+    # Démarre uniquement quand postgres est prêt à accepter des connexions.
+    # "depends_on: db" seul attendrait juste que le conteneur soit lancé —
+    # pas que PostgreSQL soit opérationnel. La condition service_healthy
+    # attend le résultat positif du healthcheck défini dans le service db.
+    depends_on:
+      db:
+        condition: service_healthy
+
+    # Connecté au réseau dédié — isolé du réseau Docker par défaut
+    networks:
+      - backend
+
+    # Redémarre automatiquement si le conteneur plante (sauf arrêt manuel)
+    restart: unless-stopped
+
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Service db — PostgreSQL 16 Alpine
+  # Alpine = image de base minimaliste (~5 MB vs ~80 MB pour debian)
+  # ─────────────────────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+
+    container_name: flask-db
+
+    # Pas de ports exposés sur l'hôte : la base n'est accessible que depuis
+    # les autres services du réseau "backend". Aucun accès direct depuis l'extérieur.
+    # Pour débugger en local, décommenter temporairement :
+    # ports:
+    #   - "5432:5432"
+
+    # PostgreSQL lit ces variables au premier démarrage pour créer la base,
+    # l'utilisateur et le mot de passe. Elles viennent du fichier .env.
+    env_file:
+      - .env
+
+    volumes:
+      # Named volume : Docker gère l'emplacement physique des données.
+      # Les données persistent entre docker compose down / up.
+      # Ne jamais supprimer ce volume en prod sans sauvegarde.
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      # pg_isready vérifie que PostgreSQL accepte des connexions.
+      # -U : utilisateur, -d : base cible (lus depuis les variables d'env)
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s      # vérification toutes les 5s
+      timeout: 5s       # abandon si pas de réponse en 5s
+      retries: 5        # 5 échecs consécutifs → conteneur "unhealthy"
+      start_period: 10s # délai de grâce au démarrage (initialisation de la base)
+
+    networks:
+      - backend
+
+    restart: unless-stopped
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Réseau bridge dédié
+# Isole les deux services du réseau Docker par défaut.
+# Les conteneurs se joignent par leur nom de service (ex : hostname "db")
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  backend:
+    driver: bridge
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Named volume pour les données PostgreSQL
+# Docker stocke les données dans /var/lib/docker/volumes/flask-cicd_postgres_data/
+# Elles survivent à "docker compose down" — supprimées uniquement avec --volumes
+# ─────────────────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:

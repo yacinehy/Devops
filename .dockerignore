@@ -34,3 +34,4 @@ CONTRIBUTING.md
 # Artefacts Docker — évite les boucles récursives
 Dockerfile
 .dockerignore
+docker-compose.yml
