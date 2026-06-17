@@ -1,0 +1,89 @@
+# =============================================================================
+# docker-compose.prod.yml — Stack de production
+#
+# Différences vs docker-compose.yml (dev) :
+#   - Pas de build : on pull l'image depuis Docker Hub (déjà testée + scannée)
+#   - Pas de PostgreSQL : géré séparément (RDS, Supabase, etc.) en prod
+#   - restart: unless-stopped : redémarre automatiquement après crash ou reboot
+#   - Pas de bind mount sur le code : l'image est immuable
+#   - Logging configuré pour la rotation (évite de saturer le disque)
+#
+# Emplacement sur le serveur : /opt/devops-cicd/docker-compose.prod.yml
+# Lancement : docker compose -f docker-compose.prod.yml up -d
+# =============================================================================
+
+services:
+
+  app:
+    # ── Image ─────────────────────────────────────────────────────────────────
+    # On pull depuis Docker Hub — jamais de build en production.
+    # L'image a déjà été testée (pytest), lintée (ruff) et scannée (Trivy)
+    # par le pipeline CI/CD avant d'être publiée.
+    # La variable IMAGE_TAG permet de déployer un SHA précis pour les rollbacks :
+    #   IMAGE_TAG=sha-a1b2c3d docker compose -f docker-compose.prod.yml up -d
+    image: ${DOCKER_USERNAME}/devops-cicd:${IMAGE_TAG:-latest}
+
+    container_name: devops-app
+
+    # ── Réseau ────────────────────────────────────────────────────────────────
+    # En prod, on expose généralement sur 127.0.0.1 uniquement
+    # et on laisse un reverse proxy (Nginx, Caddy, Traefik) gérer le port 80/443.
+    # "0.0.0.0:5000" est acceptable pour un exercice sans reverse proxy.
+    ports:
+      - "5000:5000"
+
+    # ── Variables d'environnement ──────────────────────────────────────────────
+    # Toutes les variables sensibles dans .env (non versionné, chmod 600)
+    # Voir .env.example pour la liste des variables requises
+    env_file:
+      - .env
+
+    # ── Redémarrage automatique ────────────────────────────────────────────────
+    # unless-stopped : redémarre après crash, après reboot serveur
+    #                  MAIS PAS si on l'arrête volontairement (docker compose stop)
+    # Évite "always" qui redémarrerait même un arrêt intentionnel pour maintenance
+    restart: unless-stopped
+
+    # ── Healthcheck ───────────────────────────────────────────────────────────
+    # Docker surveille l'application et la marque "unhealthy" si /health ne répond plus.
+    # Un orchestrateur (Swarm, ECS) peut alors remplacer le conteneur automatiquement.
+    # Ici : utilisé par deploy.sh pour valider le déploiement.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\""]
+      interval: 10s       # vérification toutes les 10s (plus fréquent qu'en dev)
+      timeout: 5s         # abandon si pas de réponse en 5s
+      retries: 3          # 3 échecs → "unhealthy"
+      start_period: 15s   # délai de grâce au démarrage de gunicorn
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+    # Sans configuration, Docker accumule les logs indéfiniment → disque plein.
+    # json-file avec rotation : max 10 fichiers de 10 MB = 100 MB max par service.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "10"
+
+    # ── Limites de ressources ─────────────────────────────────────────────────
+    # Empêche le conteneur de monopoliser toute la RAM en cas de fuite mémoire.
+    # À ajuster selon les ressources de la VM.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"     # max 1 CPU
+          memory: 256M    # max 256 MB RAM
+        reservations:
+          cpus: "0.1"     # garantit 10% d'un CPU
+          memory: 64M     # garantit 64 MB RAM
+
+    # ── Réseau dédié ──────────────────────────────────────────────────────────
+    networks:
+      - prod-network
+
+
+# ── Réseau ────────────────────────────────────────────────────────────────────
+# Réseau bridge isolé du réseau Docker par défaut.
+# Si tu ajoutes une base de données plus tard, elle rejoindra ce réseau.
+networks:
+  prod-network:
+    driver: bridge
