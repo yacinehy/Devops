@@ -98,7 +98,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: yacinehy/devops-cicd
+          images: ${{ secrets.DOCKER_USERNAME }}/devops-cicd
           tags: |
             type=raw,value=latest
             type=sha,format=short
@@ -152,7 +152,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           # Image publiée dans le job précédent — on scanne ce qui est en prod
-          image-ref: yacinehy/devops-cicd:latest
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/devops-cicd:latest
 
           # Format "table" : rapport lisible directement dans les logs Actions
           # Alternatives : "json" (pour l'intégrer à un SIEM), "sarif" (pour
