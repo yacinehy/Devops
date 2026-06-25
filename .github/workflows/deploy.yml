@@ -1,0 +1,353 @@
+# =============================================================================
+# deploy.yml — Pipeline CI/CD complet : test → build → deploy
+#
+# Ce fichier orchestre les trois phases du cycle de vie d'une modification :
+#   1. Vérifier que le code est correct (test)
+#   2. Packager l'application dans une image Docker (build)
+#   3. Mettre à jour le serveur de production (deploy)
+#
+# Philosophie : chaque job a une responsabilité unique et ne s'exécute que
+# si le job précédent a réussi. Un échec arrête la chaîne immédiatement.
+# =============================================================================
+name: CI/CD Deploy
+
+# ── Déclencheurs ──────────────────────────────────────────────────────────────
+on:
+  push:
+    # Ce workflow se déclenche uniquement sur push (pas sur les PRs).
+    # Pourquoi pas les PRs ? On ne déploie jamais une branche non mergée.
+    # Le job "deploy" a sa propre condition "if: main" pour restreindre davantage.
+    branches:
+      - main        # déploiement complet
+      - 'feature/*' # test uniquement (build et deploy sont bloqués par leurs conditions)
+
+
+# ── Permissions globales ───────────────────────────────────────────────────────
+# Par défaut GitHub Actions a des droits larges. On les restreint au minimum.
+# "contents: read" = peut lire le code du dépôt, rien de plus.
+permissions:
+  contents: read
+
+
+# =============================================================================
+# JOB 1 — test
+# S'exécute sur TOUS les pushs, toutes branches confondues.
+# Objectif : détecter les régressions le plus tôt possible.
+# =============================================================================
+jobs:
+  test:
+    # Le type de machine virtuelle fournie par GitHub.
+    # ubuntu-latest = Ubuntu LTS récent, gratuit pour les dépôts publics.
+    runs-on: ubuntu-latest
+
+    # Nom affiché dans l'onglet Actions — plus lisible que "test (ubuntu-latest)"
+    name: Tests & Lint
+
+    steps:
+
+      # ── Step 1 : récupérer le code ──────────────────────────────────────────
+      # Sans ce step, le runner a une VM vide sans aucun fichier.
+      # actions/checkout clone le dépôt dans le répertoire de travail du runner.
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # ── Step 2 : installer Python ───────────────────────────────────────────
+      # Le runner a déjà Python mais pas forcément la version voulue.
+      # On épingle à 3.12 pour avoir un environnement reproductible.
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── Step 3 : cache pip ──────────────────────────────────────────────────
+      # Sans cache, pip retélécharge Flask, pytest, ruff… à chaque run (~30s).
+      # Avec cache : si requirements.txt n'a pas changé, pip utilise les
+      # packages déjà stockés par GitHub → le step install devient instantané.
+      #
+      # Mécanique de la clé :
+      #   runner.os         = "Linux" (change si on passe à Windows/macOS)
+      #   hashFiles(...)    = empreinte SHA du fichier requirements.txt
+      #   Si requirements.txt change → hash différent → cache miss → pip réinstalle
+      #   Si requirements.txt identique → cache hit → pip ne fait rien
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip               # répertoire de cache pip sur Ubuntu
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-          # fallback : cache partiel si la clé exacte manque
+
+      # ── Step 4 : installer les dépendances ─────────────────────────────────
+      # pip install -r requirements.txt installe tout ce qui est listé.
+      # Si le cache du step précédent est valide, cette commande est quasi-
+      # instantanée car pip trouve les packages en local.
+      - name: Installation des dépendances
+        run: |
+          python -m pip install --upgrade pip   # toujours upgrader pip d'abord
+          pip install -r requirements.txt        # installe flask, pytest, ruff, etc.
+
+      # ── Step 5 : lint ───────────────────────────────────────────────────────
+      # ruff analyse le code sans l'exécuter (analyse statique).
+      # Il détecte : imports non utilisés, variables non définies, mauvais style…
+      # Si ruff trouve un problème → exit code 1 → le step échoue → pytest ne tourne pas.
+      # Logique : pas besoin de tester du code qu'on sait mal écrit.
+      - name: Lint — ruff check
+        run: ruff check .
+
+      # ── Step 6 : tests ──────────────────────────────────────────────────────
+      # pytest découvre et exécute tous les fichiers test_*.py.
+      # --cov=app          : mesure la couverture de code sur app.py
+      # --cov-report=term-missing : affiche les numéros de lignes non couvertes
+      # Si un seul test échoue → exit code 1 → step échoue → build ne se lance pas.
+      - name: Tests — pytest + coverage
+        run: pytest --cov=app --cov-report=term-missing
+
+
+# =============================================================================
+# JOB 2 — build
+# Ne s'exécute que si "test" passe ET qu'on est sur la branche main.
+# Objectif : produire une image Docker immutable et la pousser sur Docker Hub.
+# =============================================================================
+  build:
+    # Ce job ne démarre que quand le job "test" est terminé avec succès.
+    # Si "test" échoue, "build" est automatiquement annulé (skipped).
+    needs: test
+
+    # Condition supplémentaire : on ne build que sur main.
+    # Sur feature/*, "test" tourne mais "build" reste skipped.
+    # github.ref contient la référence complète : "refs/heads/main"
+    if: github.ref == 'refs/heads/main'
+
+    runs-on: ubuntu-latest
+    name: Build & Push Docker
+
+    # ── Outputs : transmettre des données au job suivant ──────────────────────
+    # Un job ne peut pas directement lire les variables d'un autre job.
+    # Les "outputs" sont le mécanisme officiel pour passer des valeurs entre jobs.
+    # On déclare ici les noms des outputs que ce job va produire.
+    # Les valeurs seront définies dans le step "meta" via $GITHUB_OUTPUT.
+    outputs:
+      # Le tag court (sha-a1b2c3d) permettra au job deploy de savoir quelle
+      # image exacte vient d'être buildée, pour un déploiement précis.
+      image-tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+
+      # Nécessaire même dans ce job : build-push-action a besoin du Dockerfile
+      # et du code source pour construire l'image.
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # ── Docker Buildx ───────────────────────────────────────────────────────
+      # Buildx est le backend de build Docker moderne (BuildKit).
+      # Il apporte : builds parallèles, cache avancé, multi-platform.
+      # Sans ce step, docker/build-push-action ne peut pas fonctionner.
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Authentification Docker Hub ─────────────────────────────────────────
+      # On s'authentifie avec les secrets GitHub (jamais en clair dans le YAML).
+      # secrets.DOCKER_USERNAME = ton username Docker Hub (ex: yhousny)
+      # secrets.DOCKER_PASSWORD = un Access Token Docker Hub (pas ton mot de passe)
+      # Sans ce step, le push vers Docker Hub retournerait "unauthorized".
+      - name: Login Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # ── Génération des tags ─────────────────────────────────────────────────
+      # metadata-action calcule automatiquement les tags à partir du contexte Git.
+      # On produit deux tags :
+      #
+      #   :latest     → tag mutable, toujours le build le plus récent
+      #                  utilisé pour "give me the current version"
+      #
+      #   :sha-a1b2c3d → tag immuable, lié exactement à ce commit
+      #                   utilisé pour les rollbacks ("revert to this exact build")
+      #                   github.sha = SHA complet du commit (40 caractères)
+      #                   format=short = 7 premiers caractères (ex: sha-b2ea5b1)
+      #
+      # L'action écrit ses résultats dans $GITHUB_OUTPUT sous forme de variables
+      # accessibles via steps.meta.outputs.* dans les steps suivants.
+      - name: Génération des tags Docker
+        id: meta          # id obligatoire pour référencer les outputs de ce step
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_USERNAME }}/devops-cicd   # nom de l'image sur Docker Hub
+          tags: |
+            type=raw,value=latest                               # tag :latest fixe
+            type=sha,format=short                               # tag :sha-XXXXXXX automatique
+
+      # ── Build et push ───────────────────────────────────────────────────────
+      # C'est l'étape centrale : elle lit le Dockerfile, construit l'image,
+      # et la pousse vers Docker Hub en une seule opération atomique.
+      #
+      # context: .
+      #   → le répertoire courant = racine du dépôt = où se trouve le Dockerfile
+      #
+      # push: true
+      #   → pousse l'image sur le registry après le build
+      #   → mettre false pour builder sans pousser (debug local)
+      #
+      # tags: ${{ steps.meta.outputs.tags }}
+      #   → les deux tags calculés par metadata-action (latest + sha)
+      #
+      # labels: ${{ steps.meta.outputs.labels }}
+      #   → métadonnées OCI standard (auteur, repo, commit…) intégrées dans l'image
+      #
+      # cache-from / cache-to type=gha
+      #   → GitHub Actions Cache : stocke les layers Docker entre les runs
+      #   → si requirements-prod.txt n'a pas changé, le layer pip est réutilisé
+      #   → économise ~30-40s par build
+      #   → mode=max : met en cache tous les layers intermédiaires (pas seulement le final)
+      - name: Build et push de l'image Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
+# =============================================================================
+# JOB 3 — deploy
+# Ne s'exécute que si "build" passe ET qu'on est sur main.
+# Objectif : mettre à jour le serveur de production via SSH.
+# =============================================================================
+  deploy:
+    # Attend que build soit terminé avec succès.
+    # Si build échoue (image corrompue, push raté…), on ne déploie jamais.
+    needs: build
+
+    # Même condition que build : main uniquement.
+    if: github.ref == 'refs/heads/main'
+
+    runs-on: ubuntu-latest
+    name: Deploy en production
+
+    # ── Environment GitHub ─────────────────────────────────────────────────────
+    # Un "environment" dans GitHub Actions est un groupe logique qui permet :
+    #   - d'afficher l'URL de déploiement dans l'onglet Actions
+    #   - d'ajouter une approbation manuelle obligatoire avant déploiement
+    #   - de voir l'historique des déploiements par environnement
+    #   - de restreindre quels secrets sont accessibles (secrets d'environnement)
+    # À créer dans : Settings → Environments → New environment → "production"
+    environment:
+      name: production
+      url: https://flask-cicd.fly.dev   # URL affichée dans l'onglet Actions après déploiement
+
+    steps:
+
+      # ── Connexion SSH et déploiement ─────────────────────────────────────────
+      # appleboy/ssh-action établit une connexion SSH vers le serveur
+      # et exécute le bloc "script" comme si tu tapais les commandes dans un terminal.
+      #
+      # host    : IP ou domaine du serveur (secret pour ne pas exposer l'infra)
+      # username: user SSH sur le serveur (créé par setup.sh)
+      # key     : clé privée SSH (secret GitHub — jamais en clair)
+      # port    : port SSH (22 par défaut, configurable)
+      #
+      # Le runner GitHub Actions se connecte au serveur, exécute le script,
+      # et retourne le code de sortie. Si une commande échoue → step échoue.
+      - name: Déploiement via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host:     ${{ secrets.SERVER_HOST }}        # IP du serveur (ex: 192.168.252.2)
+          username: ${{ secrets.SERVER_USER }}        # user SSH (ex: devops)
+          key:      ${{ secrets.SSH_PRIVATE_KEY }}    # contenu de ~/.ssh/gh_actions_deploy
+          port:     22                                # port SSH standard
+
+          # Le script est exécuté sur le SERVEUR, pas sur le runner GitHub.
+          # Chaque ligne est une commande shell indépendante.
+          # Si une ligne échoue, le reste ne s'exécute pas (comportement par défaut).
+          script: |
+
+            # Aller dans le dossier de l'application sur le serveur.
+            # /opt/devops-cicd est créé par setup.sh avec les bonnes permissions.
+            cd /opt/devops-cicd
+
+            # Mémoriser l'image actuellement en production AVANT de faire quoi que ce soit.
+            # Si le nouveau déploiement échoue, on en aura besoin pour le rollback.
+            # docker inspect retourne les métadonnées du conteneur en JSON.
+            # --format extrait uniquement le champ Image (ex: yhousny/devops-cicd:sha-b2ea5b1)
+            # 2>/dev/null || true : si le conteneur n'existe pas (1er déploiement), ne pas échouer.
+            PREVIOUS_IMAGE=$(docker inspect devops-app --format '{{.Config.Image}}' 2>/dev/null || true)
+            echo "Image précédente : ${PREVIOUS_IMAGE:-aucune}"
+
+            # Télécharger la nouvelle image depuis Docker Hub AVANT d'arrêter l'ancienne.
+            # Avantage : si le pull échoue (réseau, image inexistante), l'app reste en ligne.
+            # On utilise le tag sha court transmis par le job build via needs.build.outputs.
+            # ${{ needs.build.outputs.image-tag }} est interpolé par GitHub Actions
+            # avant que le script n'arrive sur le serveur.
+            NEW_IMAGE="${{ secrets.DOCKER_USERNAME }}/devops-cicd:${{ needs.build.outputs.image-tag }}"
+            echo "Nouvelle image : ${NEW_IMAGE}"
+            docker pull "${NEW_IMAGE}"
+
+            # Mettre à jour la variable IMAGE_TAG dans .env pour que docker compose
+            # utilise exactement la nouvelle image (et non :latest qui pourrait changer).
+            # sed -i modifie le fichier en place.
+            # Si la ligne IMAGE_TAG n'existe pas, on l'ajoute à la fin.
+            if grep -q "^IMAGE_TAG=" .env; then
+              sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ needs.build.outputs.image-tag }}|" .env
+            else
+              echo "IMAGE_TAG=${{ needs.build.outputs.image-tag }}" >> .env
+            fi
+
+            # Redémarrer uniquement le service "app", pas les autres services (db, redis…).
+            # --no-deps  : n'essaie pas de recréer les services dont app dépend
+            # --no-build : on ne build jamais en production (l'image vient de Docker Hub)
+            # -d         : mode détaché, la commande rend la main immédiatement
+            docker compose -f docker-compose.prod.yml up -d --no-deps --no-build app
+
+            # Attendre quelques secondes que gunicorn démarre.
+            # Alternative plus robuste : boucler sur le healthcheck (voir deploy.sh).
+            # On garde sleep 5 ici pour la lisibilité du pipeline.
+            sleep 5
+
+            # Vérifier que l'application répond correctement.
+            # curl -f : échoue si le serveur retourne un code HTTP 4xx ou 5xx
+            # curl -s : mode silencieux (pas de barre de progression)
+            # Si /health répond 200 avec {"status": "healthy"} → déploiement réussi.
+            # Si /health ne répond pas ou retourne une erreur → on entre dans le rollback.
+            if curl -sf http://localhost:5000/health; then
+              echo ""
+              echo "✅ Déploiement réussi — $(date)"
+
+            # ── Rollback automatique ──────────────────────────────────────────
+            # Le healthcheck a échoué → la nouvelle image est défectueuse.
+            # On revient à l'image qui fonctionnait avant le déploiement.
+            else
+              echo "❌ Healthcheck échoué — rollback vers ${PREVIOUS_IMAGE:-image précédente}"
+
+              # Afficher les logs du conteneur défaillant pour diagnostiquer.
+              # Utile pour comprendre pourquoi le démarrage a échoué.
+              docker logs devops-app --tail 20 || true
+
+              # Si on a bien une image précédente, on la remet en place.
+              if [ -n "${PREVIOUS_IMAGE}" ]; then
+                # Remettre l'ancien tag dans .env
+                OLD_TAG="${PREVIOUS_IMAGE##*:}"   # extrait le tag après le ":"
+                sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${OLD_TAG}|" .env
+
+                # Redémarrer avec l'ancienne image
+                docker compose -f docker-compose.prod.yml up -d --no-deps --no-build app
+
+                # Vérifier que le rollback lui-même a fonctionné
+                sleep 5
+                if curl -sf http://localhost:5000/health; then
+                  echo "✅ Rollback réussi — ancienne version restaurée"
+                else
+                  echo "❌ Rollback échoué — intervention manuelle nécessaire"
+                fi
+              else
+                echo "Pas d'image précédente — premier déploiement échoué"
+                docker compose -f docker-compose.prod.yml stop app || true
+              fi
+
+              # Sortir avec un code d'erreur pour que GitHub Actions marque ce job en rouge.
+              # Sans ce "exit 1", le job serait vert même après un rollback.
+              exit 1
+            fi
